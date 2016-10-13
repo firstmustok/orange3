@@ -6,6 +6,9 @@ import re
 import subprocess
 import sys
 import warnings
+import hashlib
+import json
+import pdb
 
 from ast import literal_eval
 from collections import OrderedDict, Counter
@@ -908,3 +911,92 @@ class UrlReader(FileFormat):
         matches = re.findall(r"filename\*?=(?:\"|.{0,10}?'[^']*')([^\"]+)",
                              content_disposition or '')
         return urlunquote(matches[-1]) if matches else default_name
+
+class JsonReader(FileFormat):
+    """Reader for tab separated files"""
+    EXTENSIONS = ('.json', '')
+    DESCRIPTION = 'json values'
+    DELIMITERS = '\t'
+    PRIORITY = 10
+
+    def read(self, xpath):
+        res = None
+        with self.open(self.filename, mode='rt') as data_file:
+            res = json.load(data_file)
+
+        elem = JsonReader.xpath_get(res, xpath)
+
+        #parse header
+        #pdb.set_trace()
+        keys = list(elem[0].keys())
+        data = [JsonReader.safe_dict(it).values() for it in elem]
+
+        typelist = [JsonReader.get_type(v) for v in data[0]]
+        #print(typelist)
+
+        #self.set_table_metadata(self.filename, table)
+        table = self.data_table(data, headers=[keys, typelist])
+        #table = self.data_table(data)
+        table.name = path.splitext(self.filename)[0]
+        table.origin = self.filename
+
+        return table
+
+    @staticmethod
+    def get_type(item):
+        if JsonReader.is_number(item):
+            return 'c'
+        #elif isinstance(item, str):
+        #    return 's'
+        else:
+            return 'd'
+
+    @staticmethod
+    def is_number(item):
+        try: float(item)
+        except ValueError: return False
+        return True
+
+    @staticmethod
+    def safe_dict(dicts):
+        result = {}
+        for key, value in dicts.items():
+            if value is None:
+                value = ''
+            result[key] = str(value)
+        return result
+
+    @staticmethod
+    def xpath_get(mydict, xpath):
+        elem = mydict
+        try:
+            for x in xpath.strip("/").split("/"):
+                if bool(elem):
+                    elem = elem.get(x)
+                else:
+                    return None
+        except:
+            pass
+
+        return elem
+
+class UrlJsonReader(JsonReader):
+    def read(self, xpath):
+        self.filename = self._resolve_redirects(self.filename)
+        name = hashlib.md5(self.filename.encode()).hexdigest()
+        with contextlib.closing(urlopen(self.filename, timeout=10)) as response:
+            with NamedTemporaryFile(suffix=name, delete=False) as f:
+                f.write(response.read())
+            self.filename = f.name
+            data = super().read(xpath)
+            unlink(f.name)
+
+        # Override name set in from_file() to avoid holding the temp prefix
+        data.name = name
+        data.origin = self.filename
+        return data
+
+    def _resolve_redirects(self, url):
+        # Resolve (potential) redirects to a final URL
+        with contextlib.closing(urlopen(url, timeout=10)) as response:
+            return response.url
